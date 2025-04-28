@@ -22,7 +22,7 @@ interface Hit {
     chunk: string
     filename: string
     page: number
-    uploadedAt: string
+    uploadedAt: Date
     score: number
 }
 
@@ -42,15 +42,19 @@ app.post(
     "/upload",
     async ({ body }) => {
         const file = body.file
-        if (!file) return new Response(JSON.stringify({ error: "Aucun PDF reçu" }), { status: 400 })
+        if (!file) {
+            return new Response(JSON.stringify({ error: "Aucun PDF reçu" }), { status: 400 })
+        }
         const fileId = uuid()
-        const uploadedAt = new Date().toISOString()
+        // Use a Date object, not a string, so Drizzle can call toISOString() itself
+        const uploadedAt = new Date()
 
         const pages = await extractTextFromPdf(file)
         for (let i = 0; i < pages.length; i++) {
             const chunks = splitIntoSemanticallyChunks(pages[i], 150, 50)
             const embedded = await getEmbeddings(chunks)
             for (const { text, embedding } of embedded) {
+                // Clean null bytes
                 const clean = text.replace(/\u0000/g, "")
                 await db.insert(documentEmbeddings).values({
                     fileId,
@@ -103,7 +107,7 @@ app.post(
         const vec = `[${qEmb.join(",")}]`
         const orderClause = sql.raw(`embedding <=> '${vec}'::vector(1536)`)
 
-        // On récupère les 5 meilleurs chunks pour ce fileId
+        // Récupère top 5
         const top5 = await db
             .select({ chunk: documentEmbeddings.chunk, page: documentEmbeddings.page })
             .from(documentEmbeddings)
@@ -111,28 +115,27 @@ app.post(
             .orderBy(orderClause)
             .limit(5)
 
-        // Construction du contexte strict
+        // Construit le prompt
         const context = top5
             .map((h, i) => `Contexte ${i + 1} (page ${h.page}) : ${h.chunk}`)
             .join("\n\n")
 
-        // Messages pour GPT-4
         const messages = [
             {
                 role: "system",
                 content:
                     "Tu es un expert Flutter. Réponds uniquement en français. " +
-                    "Utilise uniquement les informations fournies dans le contexte, sans rien inventer."
+                    "Utilise uniquement les informations fournies, sans rien inventer."
             },
             {
                 role: "user",
                 content: `Question : ${query}\n\n${context}\n\n` +
-                    "Donne une réponse claire et structurée, étape par étape, avec des exemples de code si pertinent."
+                    "Réponds de façon claire et structurée, étape par étape, avec des exemples de code si pertinent."
             }
         ]
 
         const res = await chatClient.chat.completions.create({
-            model: "gpt-4o-mini",
+            model: "gpt-4",
             messages,
             temperature: 0,
             max_tokens: 800
